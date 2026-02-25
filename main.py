@@ -328,7 +328,10 @@ def get_main_keyboard():
         types.KeyboardButton("📡 افزودن/حذف کانال"),
         types.KeyboardButton("➕ افزودن ساب")
     )
-    markup.add(types.KeyboardButton("📋 لیست ساب ها"))
+    markup.add(
+        types.KeyboardButton("📋 لیست ساب ها"),
+        types.KeyboardButton("🔄 آپدیت دستی ساب‌ها")
+    )
     return markup
 
 # ==========================================
@@ -438,6 +441,56 @@ def btn_add_sub(message):
 def btn_list_subs(message):
     clear_state(message.chat.id)
     _show_subs_list(message.chat.id, send_new=True)
+
+@bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == "🔄 آپدیت دستی ساب‌ها")
+def btn_manual_update(message):
+    clear_state(message.chat.id)
+    _show_manual_update_menu(message.chat.id, send_new=True)
+
+def _show_manual_update_menu(chat_id, send_new=False, msg_id=None):
+    """نمایش همه ساب‌ها (شامل ساب‌های پیش‌فرض) برای آپدیت دستی"""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+
+    # ساب‌های پیش‌فرض
+    markup.add(
+        types.InlineKeyboardButton(
+            f"🛡 پروکسی‌های پیش‌فرض  ({len(db['proxies'])} لینک)",
+            callback_data="manual_update:__default_proxy__"
+        )
+    )
+    markup.add(
+        types.InlineKeyboardButton(
+            f"⚡️ V2ray پیش‌فرض  ({len(db['v2ray'])} لینک)",
+            callback_data="manual_update:__default_v2ray__"
+        )
+    )
+
+    # ساب‌های سفارشی
+    for sub_id, sub in db.get("subs", {}).items():
+        icon  = "⚡️" if sub.get("type") == "v2ray" else "🛡"
+        count = len(sub.get("data", []))
+        markup.add(
+            types.InlineKeyboardButton(
+                f"{icon} {sub['name']}  ({count} لینک)",
+                callback_data=f"manual_update:{sub_id}"
+            )
+        )
+
+    markup.add(types.InlineKeyboardButton("❌ بستن", callback_data="cancel_action"))
+
+    text = (
+        "🔄 **آپدیت دستی ساب‌ها**\n\n"
+        "روی هر ساب بزنید تا همین الان از کانال‌های تعریف‌شده اسکن شود\n"
+        "و لینک‌های جدید اضافه گردد:"
+    )
+    if send_new:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        try:
+            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                  reply_markup=markup, parse_mode="Markdown")
+        except:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 def _show_subs_list(chat_id, send_new=False, msg_id=None):
     subs = db["subs"]
@@ -674,9 +727,98 @@ def callback_inline(call):
 
     # ================== بعد از وارد کردن کانال‌ها در ساخت ساب جدید ==================
     elif data == "new_sub_confirm_settings":
-        st = get_state(chat_id)
-        if st.get("state") == "add_sub_show_settings":
-            _show_new_sub_settings_menu(chat_id, msg_id, st["data"])
+        st2 = get_state(chat_id)
+        if st2.get("state") == "add_sub_show_settings":
+            _show_new_sub_settings_menu(chat_id, msg_id, st2["data"])
+
+    # ================== تنظیمات ساخت ساب جدید (ادغام‌شده) ==================
+    elif data == "new_sub_set_limits":
+        st2 = get_state(chat_id)
+        set_state(chat_id, "new_sub_waiting_limits", st2.get("data", {}))
+        _edit_with_cancel(chat_id, msg_id,
+            "سقف ذخیره و تعداد حذف از آخر را بفرست.\nمثال: `400-100`")
+
+    elif data == "new_sub_set_scrape":
+        st2 = get_state(chat_id)
+        set_state(chat_id, "new_sub_waiting_scrape", st2.get("data", {}))
+        _edit_with_cancel(chat_id, msg_id,
+            "زمان بررسی کانال‌ها را به **دقیقه** بفرست. (مثال: `60`)")
+
+    elif data == "new_sub_set_clean":
+        st2 = get_state(chat_id)
+        set_state(chat_id, "new_sub_waiting_clean", st2.get("data", {}))
+        _edit_with_cancel(chat_id, msg_id,
+            "زمان پاکسازی اجباری را به **ساعت** بفرست. (مثال: `12`)")
+
+    elif data == "new_sub_create":
+        st2 = get_state(chat_id)
+        _finalize_new_sub(chat_id, msg_id, st2.get("data", {}))
+
+    # ================== آپدیت دستی ساب‌ها ==================
+    elif data.startswith("manual_update:"):
+        target = data.split(":", 1)[1]
+        bot.answer_callback_query(call.id, "⏳ در حال اسکن...", show_alert=False)
+
+        if target == "__default_proxy__":
+            # اسکن کانال‌های پیش‌فرض فقط برای پروکسی
+            all_p = []
+            for ch in db["channels"]:
+                p, _ = scrape_channel(ch, collect_proxy=True, collect_v2ray=False)
+                all_p.extend(p)
+                time.sleep(0.5)
+            sett = db["settings"]
+            db["proxies"], added = update_queue(db["proxies"], all_p,
+                                                sett["max_limit"], sett["delete_batch"])
+            save_db(db)
+            bot.send_message(
+                chat_id,
+                f"✅ **آپدیت ساب پروکسی پیش‌فرض**\n\n"
+                f"کانال‌های اسکن‌شده: {len(db['channels'])} عدد\n"
+                f"لینک‌های جدید: **+{added}** عدد\n"
+                f"مجموع در ساب: {len(db['proxies'])} عدد",
+                parse_mode="Markdown"
+            )
+
+        elif target == "__default_v2ray__":
+            # اسکن کانال‌های پیش‌فرض فقط برای v2ray
+            all_v = []
+            for ch in db["channels"]:
+                _, v = scrape_channel(ch, collect_proxy=False, collect_v2ray=True)
+                all_v.extend(v)
+                time.sleep(0.5)
+            sett = db["settings"]
+            db["v2ray"], added = update_queue(db["v2ray"], all_v,
+                                              sett["max_limit"], sett["delete_batch"])
+            save_db(db)
+            bot.send_message(
+                chat_id,
+                f"✅ **آپدیت ساب V2ray پیش‌فرض**\n\n"
+                f"کانال‌های اسکن‌شده: {len(db['channels'])} عدد\n"
+                f"لینک‌های جدید: **+{added}** عدد\n"
+                f"مجموع در ساب: {len(db['v2ray'])} عدد",
+                parse_mode="Markdown"
+            )
+
+        else:
+            # ساب سفارشی
+            sub = db["subs"].get(target)
+            if sub:
+                added = _update_sub(target)
+                save_db(db)
+                icon = "⚡️" if sub.get("type") == "v2ray" else "🛡"
+                bot.send_message(
+                    chat_id,
+                    f"✅ **آپدیت ساب {icon} «{sub['name']}»**\n\n"
+                    f"کانال‌های اسکن‌شده: {len(sub.get('channels', []))} عدد\n"
+                    f"لینک‌های جدید: **+{added}** عدد\n"
+                    f"مجموع در ساب: {len(sub.get('data', []))} عدد",
+                    parse_mode="Markdown"
+                )
+            else:
+                bot.send_message(chat_id, "⚠️ ساب پیدا نشد.")
+
+        # نمایش مجدد منوی آپدیت با تعداد جدید
+        _show_manual_update_menu(chat_id, msg_id=msg_id)
 
     bot.answer_callback_query(call.id)
 
@@ -733,37 +875,6 @@ def _show_new_sub_settings_menu(chat_id, msg_id, data):
                               reply_markup=markup, parse_mode="Markdown")
     except:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-
-
-# هندلر callback برای تنظیمات ساخت ساب جدید (باید مجزا باشد)
-@bot.callback_query_handler(func=lambda call: is_admin(call.message.chat.id) and
-                             call.data in ("new_sub_set_limits", "new_sub_set_scrape",
-                                           "new_sub_set_clean", "new_sub_create"))
-def callback_new_sub_settings(call):
-    chat_id = call.message.chat.id
-    msg_id  = call.message.message_id
-    data    = call.data
-    st      = get_state(chat_id)
-
-    if data == "new_sub_set_limits":
-        set_state(chat_id, "new_sub_waiting_limits", st.get("data", {}))
-        _edit_with_cancel(chat_id, msg_id,
-            "سقف ذخیره و تعداد حذف از آخر را بفرست.\nمثال: `400-100`")
-
-    elif data == "new_sub_set_scrape":
-        set_state(chat_id, "new_sub_waiting_scrape", st.get("data", {}))
-        _edit_with_cancel(chat_id, msg_id,
-            "زمان بررسی کانال‌ها را به **دقیقه** بفرست. (مثال: `60`)")
-
-    elif data == "new_sub_set_clean":
-        set_state(chat_id, "new_sub_waiting_clean", st.get("data", {}))
-        _edit_with_cancel(chat_id, msg_id,
-            "زمان پاکسازی اجباری را به **ساعت** بفرست. (مثال: `12`)")
-
-    elif data == "new_sub_create":
-        _finalize_new_sub(chat_id, msg_id, st.get("data", {}))
-
-    bot.answer_callback_query(call.id)
 
 
 def _finalize_new_sub(chat_id, msg_id, data):
