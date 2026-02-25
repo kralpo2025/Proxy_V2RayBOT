@@ -58,6 +58,22 @@ def save_db(data):
 
 db = load_db()
 
+def _initial_dedup():
+    """حذف تکراری‌های احتمالی از داده‌های ذخیره‌شده هنگام بارگذاری اولیه"""
+    changed = False
+    for key in ("proxies", "v2ray"):
+        before = len(db[key])
+        db[key] = deduplicate_list(db[key])
+        if len(db[key]) != before:
+            changed = True
+    for sub in db.get("subs", {}).values():
+        before = len(sub.get("data", []))
+        sub["data"] = deduplicate_list(sub.get("data", []))
+        if len(sub["data"]) != before:
+            changed = True
+    if changed:
+        save_db(db)
+
 # state هر کاربر — می‌تواند dict با کلیدهای "state" و "data" باشد
 user_states = {}
 
@@ -141,11 +157,43 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
 
     return new_proxies, new_v2ray
 
+def normalize_link(link: str) -> str:
+    """
+    لینک را نرمالایز می‌کند تا مقایسه تکراری بودن دقیق‌تر باشد.
+    - به lowercase تبدیل می‌کند (برای بخش پروتکل و هاست)
+    - فاصله‌های اضافه را حذف می‌کند
+    - برای لینک‌های دارای query string پارامترها را مرتب می‌کند
+    """
+    link = link.strip()
+    try:
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        parsed = urlparse(link)
+        # scheme و netloc را lowercase کن
+        scheme   = parsed.scheme.lower()
+        netloc   = parsed.netloc.lower()
+        path     = parsed.path
+        # پارامترها را مرتب کن تا ترتیب متفاوت = تکراری شناخته شود
+        params   = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
+        fragment = parsed.fragment
+        return urlunparse((scheme, netloc, path, parsed.params, params, fragment))
+    except Exception:
+        return link.lower()
+
+
 def update_queue(current_list, new_items, max_limit, delete_batch):
+    """
+    آیتم‌های جدید را به اول صف اضافه می‌کند.
+    از نرمالایز کردن لینک‌ها برای جلوگیری از ورود هر نوع تکراری استفاده می‌کند.
+    """
+    # یک set از نسخه نرمالایزشده آیتم‌های فعلی برای مقایسه سریع
+    existing_normalized = {normalize_link(x) for x in current_list}
+
     added_count = 0
     for item in reversed(new_items):
-        if item not in current_list:
+        norm = normalize_link(item)
+        if norm not in existing_normalized:
             current_list.insert(0, item)
+            existing_normalized.add(norm)
             added_count += 1
 
     if len(current_list) > max_limit:
@@ -153,6 +201,25 @@ def update_queue(current_list, new_items, max_limit, delete_batch):
         current_list = current_list[:keep]
 
     return current_list, added_count
+
+
+def deduplicate_list(lst: list) -> list:
+    """
+    یک لیست موجود را پاکسازی می‌کند و تمام تکراری‌ها را حذف می‌کند.
+    اولین نمونه هر لینک حفظ می‌شود.
+    """
+    seen = set()
+    result = []
+    for item in lst:
+        norm = normalize_link(item)
+        if norm not in seen:
+            seen.add(norm)
+            result.append(item)
+    return result
+
+# اجرای پاکسازی اولیه روی داده‌های بارگذاری‌شده
+_initial_dedup()
+
 
 def scrape_all_channels():
     """اسکن سراسری همه کانال‌های پیش‌فرض + ساب‌های سفارشی"""
