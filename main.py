@@ -89,9 +89,8 @@ def clear_state(chat_id):
 # ==========================================
 # الگوهای Regex
 # ==========================================
-PROXY_REGEX   = r'(?:https?://t\.me/proxy\?server=|tg://proxy\?server=)[^\s<>"\'\\]+'
-V2RAY_REGEX   = r'(?:vless|vmess|ss|trojan)://[^\s<>"\'\\]+'
-TXT_CDN_REGEX = r'(https://cdn\d*\.telegram\.org/file/[A-Za-z0-9_\-]+)'
+PROXY_REGEX = r'(?:https?://t\.me/proxy\?server=|tg://proxy\?server=)[^\s<>"\'\\]+'
+V2RAY_REGEX = r'(?:vless|vmess|ss|trojan)://[^\s<>"\'\\]+'
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -107,32 +106,8 @@ def extract_configs(text):
     v2ray   = [l.replace("&amp;", "&").strip() for l in re.findall(V2RAY_REGEX, text)]
     return proxies, v2ray
 
-def try_download_txt_files(html):
-    """
-    سعی می‌کند فایل‌های .txt از CDN تلگرام را دانلود کند
-    و سرورهای v2ray داخل آن‌ها را برگرداند.
-    """
-    v2ray_found = []
-    cdn_links = list(set(re.findall(TXT_CDN_REGEX, html)))
-
-    # فقط لینک‌هایی که احتمال txt بودن دارند (نزدیک به کلمه .txt در html)
-    for link in cdn_links[:15]:
-        try:
-            r = requests.get(link, headers=HEADERS, timeout=8)
-            if r.status_code == 200:
-                content_type = r.headers.get("Content-Type", "")
-                # فقط فایل‌های متنی یا بدون نوع مشخص را بخوان
-                if "text" in content_type or "octet-stream" in content_type or content_type == "":
-                    if len(r.content) < 5 * 1024 * 1024:  # حداکثر 5 مگابایت
-                        _, v2 = extract_configs(r.text)
-                        v2ray_found.extend(v2)
-        except:
-            pass
-
-    return v2ray_found
-
 def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
-    """یک کانال را اسکن می‌کند و لینک‌های پیداشده را برمی‌گرداند."""
+    """یک کانال عمومی را از طریق t.me/s/ اسکن می‌کند و لینک‌های v2ray/proxy را استخراج می‌کند."""
     new_proxies = []
     new_v2ray   = []
     url = f"https://t.me/s/{channel.replace('@', '').strip()}"
@@ -140,21 +115,14 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             html = response.text
-
             if collect_proxy:
                 p, _ = extract_configs(html)
                 new_proxies.extend(p)
-
             if collect_v2ray:
                 _, v = extract_configs(html)
                 new_v2ray.extend(v)
-                # بررسی فایل‌های txt داخل کانال
-                txt_servers = try_download_txt_files(html)
-                new_v2ray.extend(txt_servers)
-
     except Exception as e:
         print(f"خطا در اسکن {channel}: {e}")
-
     return new_proxies, new_v2ray
 
 def normalize_link(link: str) -> str:
@@ -538,7 +506,10 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
         types.InlineKeyboardButton("🧹 زمان پاکسازی", callback_data=f"sub_edit_clean:{sub_id}")
     )
     markup.add(
-        types.InlineKeyboardButton("🔄 آپدیت دستی",  callback_data=f"sub_force_update:{sub_id}"),
+        types.InlineKeyboardButton("🔄 آپدیت دستی",       callback_data=f"sub_force_update:{sub_id}"),
+        types.InlineKeyboardButton("📥 وارد از لینک ساب", callback_data=f"sub_import_url:{sub_id}")
+    )
+    markup.add(
         types.InlineKeyboardButton("🗑 حذف این ساب", callback_data=f"sub_delete_confirm:{sub_id}")
     )
     markup.add(types.InlineKeyboardButton("◀️ بازگشت به لیست", callback_data="back_to_subs"))
@@ -650,6 +621,21 @@ def callback_inline(call):
         sub = db["subs"].get(sub_id, {})
         bot.send_message(chat_id, f"✅ ساب «{sub.get('name','')}» آپدیت شد.\n+{added} لینک جدید اضافه شد.")
         _show_sub_detail(chat_id, sub_id, msg_id)
+
+    elif data.startswith("sub_import_url:"):
+        sub_id = data.split(":", 1)[1]
+        sub    = db["subs"].get(sub_id, {})
+        icon   = "⚡️" if sub.get("type") == "v2ray" else "🛡"
+        set_state(chat_id, "sub_import_url", {"sub_id": sub_id})
+        _edit_with_cancel(
+            chat_id, msg_id,
+            f"📥 **وارد کردن از لینک ساب خارجی**\n\n"
+            f"ساب مقصد: {icon} **{sub.get('name','')}**\n"
+            f"نوع: {'V2ray' if sub.get('type')=='v2ray' else 'Proxy'}\n\n"
+            "لینک ساب خارجی را بفرستید.\n"
+            "_(لینک‌های base64 و متنی هر دو پشتیبانی می‌شوند)_",
+            back_data=f"sub_detail:{sub_id}"
+        )
 
     elif data.startswith("sub_delete_confirm:"):
         sub_id = data.split(":", 1)[1]
@@ -1048,6 +1034,87 @@ def handle_states(message):
             bot.reply_to(message, f"✅ زمان پاکسازی روی {text_in} ساعت تنظیم شد.")
         except:
             bot.reply_to(message, "⚠️ فقط عدد بفرستید.")
+        clear_state(chat_id)
+        _show_sub_detail(chat_id, sub_id)
+
+    elif state == "sub_import_url":
+        sub_id   = data.get("sub_id")
+        sub      = db["subs"].get(sub_id)
+        if not sub:
+            bot.reply_to(message, "⚠️ ساب پیدا نشد.")
+            clear_state(chat_id)
+            return
+
+        url      = text_in.strip()
+        sub_type = sub.get("type", "v2ray")
+
+        wait_msg = bot.reply_to(message, "⏳ در حال دریافت و پردازش لینک ساب...")
+
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            raw = resp.text.strip()
+
+            # تلاش برای decode کردن base64
+            decoded = ""
+            try:
+                # padding اضافه کن اگر لازم باشد
+                padded = raw + "=" * (-len(raw) % 4)
+                decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+            except Exception:
+                decoded = ""
+
+            # اگر decode موفق بود و شامل vless/vmess/ss/trojan بود استفاده کن
+            content = decoded if decoded and re.search(V2RAY_REGEX, decoded) else raw
+
+            proxies_found, v2ray_found = extract_configs(content)
+
+            if sub_type == "proxy":
+                links = proxies_found
+            else:
+                links = v2ray_found
+
+            if not links:
+                bot.edit_message_text(
+                    "⚠️ هیچ لینک معتبری در این ساب پیدا نشد.\n"
+                    f"_(نوع ساب: {'V2ray' if sub_type=='v2ray' else 'Proxy'})_",
+                    chat_id=chat_id, message_id=wait_msg.message_id,
+                    parse_mode="Markdown"
+                )
+                clear_state(chat_id)
+                return
+
+            sub_sett = sub.get("settings", db["settings"])
+            sub["data"], added = update_queue(
+                sub.get("data", []), links,
+                sub_sett["max_limit"], sub_sett["delete_batch"]
+            )
+            save_db(db)
+
+            icon = "⚡️" if sub_type == "v2ray" else "🛡"
+            bot.edit_message_text(
+                f"✅ **وارد کردن از لینک ساب انجام شد!**\n\n"
+                f"ساب: {icon} **{sub['name']}**\n"
+                f"لینک‌های یافت‌شده: {len(links)} عدد\n"
+                f"لینک‌های جدید اضافه‌شده: **+{added}** عدد\n"
+                f"مجموع در ساب: {len(sub['data'])} عدد",
+                chat_id=chat_id, message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+
+        except requests.exceptions.RequestException as e:
+            bot.edit_message_text(
+                f"❌ خطا در دریافت لینک:\n`{e}`",
+                chat_id=chat_id, message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            bot.edit_message_text(
+                f"❌ خطای ناشناخته:\n`{e}`",
+                chat_id=chat_id, message_id=wait_msg.message_id,
+                parse_mode="Markdown"
+            )
+
         clear_state(chat_id)
         _show_sub_detail(chat_id, sub_id)
 
