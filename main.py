@@ -529,24 +529,27 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
         bot.send_message(chat_id, "⚠️ ساب پیدا نشد.")
         return
 
-    sett  = sub.get("settings", {})
-    chans = sub.get("channels", [])
-    count = len(sub.get("data", []))
-    icon  = "⚡️" if sub.get("type") == "v2ray" else "🛡"
+    sett     = sub.get("settings", {})
+    chans    = sub.get("channels", [])
+    count    = len(sub.get("data", []))
+    icon     = "⚡️" if sub.get("type") == "v2ray" else "🛡"
     sub_link = f"{get_base_url()}/sub/{sub['name']}"
 
+    # اسم ساب و کانال‌ها رو escape می‌کنیم تا underscore مشکل Markdown ایجاد نکند
+    safe_name  = _escape_md(sub['name'])
+    safe_link  = _escape_md(sub_link)
+    safe_chans = "\n".join([f"• {_escape_md(c)}" for c in chans]) if chans else "• ندارد"
+
     text = (
-        f"{icon} **ساب: {sub['name']}**\n"
+        f"{icon} *ساب: {safe_name}*\n"
         f"نوع: {'V2ray' if sub['type']=='v2ray' else 'Proxy'}\n\n"
-        f"📡 کانال‌ها ({len(chans)}):\n" +
-        ("\n".join([f"• {c}" for c in chans]) if chans else "• ندارد") +
-        f"\n\n"
+        f"📡 کانال‌ها ({len(chans)}):\n{safe_chans}\n\n"
         f"⚙️ سقف ذخیره: {sett.get('max_limit', 400)}\n"
         f"🗑 حذف از آخر: {sett.get('delete_batch', 100)}\n"
         f"⏱ بررسی: هر {sett.get('scrape_interval_mins', 60)} دقیقه\n"
         f"🧹 پاکسازی: هر {sett.get('clean_interval_hours', 12)} ساعت\n\n"
         f"📊 لینک‌های فعلی: {count} عدد\n"
-        f"🔗 لینک ساب:\n`{sub_link}`"
+        f"🔗 لینک ساب:\n`{safe_link}`"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -567,14 +570,20 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
     )
     markup.add(types.InlineKeyboardButton("◀️ بازگشت به لیست", callback_data="back_to_subs"))
 
-    if msg_id:
+    for pm in ["Markdown", None]:
         try:
-            bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
-                                  reply_markup=markup, parse_mode="Markdown")
+            if msg_id:
+                bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                      reply_markup=markup, parse_mode=pm)
+            else:
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode=pm)
             return
-        except:
-            pass
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        except Exception:
+            try:
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode=pm)
+                return
+            except Exception:
+                continue
 
 # ==========================================
 # هندلر Callback Query — مرکزی
@@ -593,7 +602,7 @@ def callback_inline(call):
 
     elif data == "del_chan":
         set_state(chat_id, "waiting_for_del_chan")
-        chans = "\n".join(db["channels"]) or "کانالی وجود ندارد."
+        chans = "\n".join(db["channels"]) if db["channels"] else "کانالی وجود ندارد."
         _edit_with_cancel(chat_id, msg_id,
             f"کانال‌های فعلی:\n{chans}\n\nآیدی کانال‌هایی که می‌خواهید حذف شوند را بفرستید.")
 
@@ -823,16 +832,32 @@ def callback_inline(call):
     bot.answer_callback_query(call.id)
 
 
+def _escape_md(text: str) -> str:
+    """کاراکترهای خاص Markdown v1 را escape می‌کند تا خطای parse نگیریم."""
+    for ch in ['_', '*', '`', '[']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
 def _edit_with_cancel(chat_id, msg_id, text, back_data=None):
     markup = types.InlineKeyboardMarkup()
     if back_data:
         markup.add(types.InlineKeyboardButton("◀️ برگشت", callback_data=back_data))
     markup.add(types.InlineKeyboardButton("❌ کنسل", callback_data="cancel_action"))
-    try:
-        bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
-                              reply_markup=markup, parse_mode="Markdown")
-    except:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    # سعی می‌کنیم با Markdown، اگه fail شد بدون parse_mode می‌فرستیم
+    for pm in ["Markdown", None]:
+        try:
+            if msg_id:
+                bot.edit_message_text(text, chat_id=chat_id, message_id=msg_id,
+                                      reply_markup=markup, parse_mode=pm)
+            else:
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode=pm)
+            return
+        except Exception:
+            try:
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode=pm)
+                return
+            except Exception:
+                continue
 
 
 def _show_new_sub_settings_menu(chat_id, msg_id, data):
