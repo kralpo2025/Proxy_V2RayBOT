@@ -53,6 +53,11 @@ def load_db():
     return default_db
 
 def save_db(data):
+    # قبل از هر بار ذخیره، تکراری‌ها را حذف کن
+    for key in ("proxies", "v2ray"):
+        data[key] = deduplicate_list(data[key])
+    for sub in data.get("subs", {}).values():
+        sub["data"] = deduplicate_list(sub.get("data", []))
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
@@ -292,23 +297,25 @@ def index():
 
 @app.route('/sub/proxies')
 def sub_proxies():
-    return Response("\n".join(db["proxies"]), mimetype='text/plain')
+    clean = deduplicate_list(db["proxies"])
+    return Response("\n".join(clean), mimetype='text/plain')
 
 @app.route('/sub/v2ray')
 def sub_v2ray():
-    content = base64.b64encode("\n".join(db["v2ray"]).encode()).decode()
+    clean = deduplicate_list(db["v2ray"])
+    content = base64.b64encode("\n".join(clean).encode()).decode()
     return Response(content, mimetype='text/plain')
 
 @app.route('/sub/<sub_name>')
 def sub_custom(sub_name):
     for sub_id, sub in db["subs"].items():
         if sub.get("name", "").lower() == sub_name.lower():
-            data = sub.get("data", [])
+            clean = deduplicate_list(sub.get("data", []))
             sub_type = sub.get("type", "v2ray")
             if sub_type == "v2ray":
-                content = base64.b64encode("\n".join(data).encode()).decode()
+                content = base64.b64encode("\n".join(clean).encode()).decode()
             else:
-                content = "\n".join(data)
+                content = "\n".join(clean)
             return Response(content, mimetype='text/plain')
     return Response("not found", status=404)
 
