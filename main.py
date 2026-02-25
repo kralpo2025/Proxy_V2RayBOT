@@ -9,6 +9,7 @@ import os
 import json
 import base64
 import uuid
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 
 # ==========================================
 # تنظیمات اولیه و حیاتی ربات
@@ -125,28 +126,158 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
         print(f"خطا در اسکن {channel}: {e}")
     return new_proxies, new_v2ray
 
-def normalize_link(link: str) -> str:
-    """
-    لینک را نرمالایز می‌کند تا مقایسه تکراری بودن دقیق‌تر باشد.
-    - به lowercase تبدیل می‌کند (برای بخش پروتکل و هاست)
-    - فاصله‌های اضافه را حذف می‌کند
-    - برای لینک‌های دارای query string پارامترها را مرتب می‌کند
-    """
-    link = link.strip()
+# ==========================================
+# توابع نرمال‌سازی پیشرفته برای تشخیص تکرار واقعی
+# ==========================================
+
+def _extract_proxy_key(link):
+    """استخراج کلید یکتا برای پروکسی‌های MTProto: server:port:secret"""
     try:
-        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        parsed = urlparse(link.replace('t.me/proxy', 'tg').replace('tg://proxy', 'http://fake'))
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        server = params.get('server', [''])[0]
+        port   = params.get('port', [''])[0]
+        secret = params.get('secret', [''])[0]
+        if server and port:
+            return f"proxy:{server}:{port}:{secret}"
+    except:
+        pass
+    return None
+
+def _extract_vmess_key(link):
+    """استخراج کلید یکتا برای VMess: decoded json -> add, port, id, aid, net, type, tls, host, path"""
+    try:
+        b64 = link[8:].strip()
+        b64 += '=' * (-len(b64) % 4)
+        decoded = base64.urlsafe_b64decode(b64).decode('utf-8')
+        config = json.loads(decoded)
+        # فیلدهای کلیدی
+        key_parts = [
+            config.get('add', ''),
+            str(config.get('port', '')),
+            config.get('id', ''),
+            str(config.get('aid', '0')),
+            config.get('net', 'tcp'),
+            config.get('type', 'none'),
+            config.get('tls', ''),
+            config.get('host', ''),
+            config.get('path', ''),
+        ]
+        return 'vmess:' + ':'.join(key_parts)
+    except:
+        return None
+
+def _extract_vless_key(link):
+    """vless://uuid@server:port?parameters..."""
+    try:
         parsed = urlparse(link)
-        # scheme و netloc را lowercase کن
-        scheme   = parsed.scheme.lower()
-        netloc   = parsed.netloc.lower()
-        path     = parsed.path
-        # پارامترها را مرتب کن تا ترتیب متفاوت = تکراری شناخته شود
-        params   = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
+        if parsed.scheme != 'vless':
+            return None
+        userinfo = parsed.username or ''
+        host = parsed.hostname or ''
+        port = str(parsed.port) if parsed.port else '443'
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        encryption = params.get('encryption', ['none'])[0]
+        flow = params.get('flow', [''])[0]
+        return f"vless:{host}:{port}:{userinfo}:{encryption}:{flow}"
+    except:
+        return None
+
+def _extract_trojan_key(link):
+    """trojan://password@server:port?parameters..."""
+    try:
+        parsed = urlparse(link)
+        if parsed.scheme != 'trojan':
+            return None
+        password = parsed.username or ''
+        host = parsed.hostname or ''
+        port = str(parsed.port) if parsed.port else '443'
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        peer = params.get('peer', [''])[0]
+        return f"trojan:{host}:{port}:{password}:{peer}"
+    except:
+        return None
+
+def _extract_ss_key(link):
+    """Shadowsocks: استخراج host, port, method, password"""
+    try:
+        parsed = urlparse(link)
+        if parsed.scheme != 'ss':
+            return None
+        # فرمت‌های مختلف
+        if '@' in parsed.netloc:
+            # userinfo@host:port
+            auth, hostport = parsed.netloc.split('@', 1)
+            if ':' in auth:
+                method, password = auth.split(':', 1)
+            else:
+                # ممکن است base64 باشد؟
+                return None
+            if ':' in hostport:
+                host, port = hostport.split(':', 1)
+            else:
+                host = hostport
+                port = ''
+        else:
+            # SIP002: base64(method:password)@host:port?params
+            # ساده‌سازی: فرض می‌کنیم netloc بخش base64 است
+            # این بخش را می‌توان با پکیج‌های مخصوص کامل‌تر کرد، اما برای سادگی فعلاً پشتیبانی نمی‌کنیم
+            return None
+        return f"ss:{host}:{port}:{method}:{password}"
+    except:
+        return None
+
+def _basic_normalize(link):
+    """نرمال‌سازی پایه (lowercase, مرتب‌سازی query) برای مواقع fallback"""
+    try:
+        parsed = urlparse(link)
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path
+        params = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
         fragment = parsed.fragment
         return urlunparse((scheme, netloc, path, parsed.params, params, fragment))
-    except Exception:
+    except:
         return link.lower()
 
+def normalize_link(link: str) -> str:
+    """
+    نرمال‌سازی پیشرفته:
+    - برای پروکسی: server:port:secret
+    - برای vmess: فیلدهای کلیدی JSON
+    - برای vless/trojan/ss: استخراج پارامترهای اصلی
+    - در غیر اینصورت: نرمال‌سازی پایه
+    خروجی یک رشته یکتا برای مقایسه دقیق تکراری‌هاست.
+    """
+    link = link.strip()
+    # پروکسی تلگرام
+    if link.startswith(('https://t.me/proxy?', 'tg://proxy?')):
+        key = _extract_proxy_key(link)
+        if key:
+            return key
+    # پروتکل‌های v2ray
+    elif link.startswith('vmess://'):
+        key = _extract_vmess_key(link)
+        if key:
+            return key
+    elif link.startswith('vless://'):
+        key = _extract_vless_key(link)
+        if key:
+            return key
+    elif link.startswith('trojan://'):
+        key = _extract_trojan_key(link)
+        if key:
+            return key
+    elif link.startswith('ss://'):
+        key = _extract_ss_key(link)
+        if key:
+            return key
+    # اگر هیچکدام جواب نداد، نرمال‌سازی پایه
+    return _basic_normalize(link)
+
+# ==========================================
+# توابع مدیریت صف
+# ==========================================
 
 def update_queue(current_list, new_items, max_limit, delete_batch):
     """
@@ -170,7 +301,6 @@ def update_queue(current_list, new_items, max_limit, delete_batch):
 
     return current_list, added_count
 
-
 def deduplicate_list(lst: list) -> list:
     """
     یک لیست موجود را پاکسازی می‌کند و تمام تکراری‌ها را حذف می‌کند.
@@ -187,7 +317,6 @@ def deduplicate_list(lst: list) -> list:
 
 # اجرای پاکسازی اولیه روی داده‌های بارگذاری‌شده
 _initial_dedup()
-
 
 def scrape_all_channels():
     """اسکن سراسری همه کانال‌های پیش‌فرض + ساب‌های سفارشی"""
