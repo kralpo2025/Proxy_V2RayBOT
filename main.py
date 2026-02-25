@@ -9,7 +9,6 @@ import os
 import json
 import base64
 import uuid
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 
 # ==========================================
 # تنظیمات اولیه و حیاتی ربات
@@ -126,165 +125,39 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
         print(f"خطا در اسکن {channel}: {e}")
     return new_proxies, new_v2ray
 
-# ==========================================
-# توابع نرمال‌سازی پیشرفته برای تشخیص تکرار واقعی
-# ==========================================
-
-def _extract_proxy_key(link):
-    """استخراج کلید یکتا برای پروکسی‌های MTProto: server:port:secret"""
-    try:
-        parsed = urlparse(link.replace('t.me/proxy', 'tg').replace('tg://proxy', 'http://fake'))
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        server = params.get('server', [''])[0]
-        port   = params.get('port', [''])[0]
-        secret = params.get('secret', [''])[0]
-        if server and port:
-            return f"proxy:{server}:{port}:{secret}"
-    except:
-        pass
-    return None
-
-def _extract_vmess_key(link):
-    """استخراج کلید یکتا برای VMess: decoded json -> add, port, id, aid, net, type, tls, host, path"""
-    try:
-        b64 = link[8:].strip()
-        b64 += '=' * (-len(b64) % 4)
-        decoded = base64.urlsafe_b64decode(b64).decode('utf-8')
-        config = json.loads(decoded)
-        # فیلدهای کلیدی
-        key_parts = [
-            config.get('add', ''),
-            str(config.get('port', '')),
-            config.get('id', ''),
-            str(config.get('aid', '0')),
-            config.get('net', 'tcp'),
-            config.get('type', 'none'),
-            config.get('tls', ''),
-            config.get('host', ''),
-            config.get('path', ''),
-        ]
-        return 'vmess:' + ':'.join(key_parts)
-    except:
-        return None
-
-def _extract_vless_key(link):
-    """vless://uuid@server:port?parameters..."""
-    try:
-        parsed = urlparse(link)
-        if parsed.scheme != 'vless':
-            return None
-        userinfo = parsed.username or ''
-        host = parsed.hostname or ''
-        port = str(parsed.port) if parsed.port else '443'
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        encryption = params.get('encryption', ['none'])[0]
-        flow = params.get('flow', [''])[0]
-        return f"vless:{host}:{port}:{userinfo}:{encryption}:{flow}"
-    except:
-        return None
-
-def _extract_trojan_key(link):
-    """trojan://password@server:port?parameters..."""
-    try:
-        parsed = urlparse(link)
-        if parsed.scheme != 'trojan':
-            return None
-        password = parsed.username or ''
-        host = parsed.hostname or ''
-        port = str(parsed.port) if parsed.port else '443'
-        params = parse_qs(parsed.query, keep_blank_values=True)
-        peer = params.get('peer', [''])[0]
-        return f"trojan:{host}:{port}:{password}:{peer}"
-    except:
-        return None
-
-def _extract_ss_key(link):
-    """Shadowsocks: استخراج host, port, method, password"""
-    try:
-        parsed = urlparse(link)
-        if parsed.scheme != 'ss':
-            return None
-        # فرمت‌های مختلف
-        if '@' in parsed.netloc:
-            # userinfo@host:port
-            auth, hostport = parsed.netloc.split('@', 1)
-            if ':' in auth:
-                method, password = auth.split(':', 1)
-            else:
-                # ممکن است base64 باشد؟
-                return None
-            if ':' in hostport:
-                host, port = hostport.split(':', 1)
-            else:
-                host = hostport
-                port = ''
-        else:
-            # SIP002: base64(method:password)@host:port?params
-            # ساده‌سازی: فرض می‌کنیم netloc بخش base64 است
-            # این بخش را می‌توان با پکیج‌های مخصوص کامل‌تر کرد، اما برای سادگی فعلاً پشتیبانی نمی‌کنیم
-            return None
-        return f"ss:{host}:{port}:{method}:{password}"
-    except:
-        return None
-
-def _basic_normalize(link):
-    """نرمال‌سازی پایه (lowercase, مرتب‌سازی query) برای مواقع fallback"""
-    try:
-        parsed = urlparse(link)
-        scheme = parsed.scheme.lower()
-        netloc = parsed.netloc.lower()
-        path = parsed.path
-        params = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
-        fragment = parsed.fragment
-        return urlunparse((scheme, netloc, path, parsed.params, params, fragment))
-    except:
-        return link.lower()
-
 def normalize_link(link: str) -> str:
     """
-    نرمال‌سازی پیشرفته:
-    - برای پروکسی: server:port:secret
-    - برای vmess: فیلدهای کلیدی JSON
-    - برای vless/trojan/ss: استخراج پارامترهای اصلی
-    - در غیر اینصورت: نرمال‌سازی پایه
-    خروجی یک رشته یکتا برای مقایسه دقیق تکراری‌هاست.
+    لینک را نرمالایز می‌کند تا مقایسه تکراری بودن دقیق‌تر باشد.
+    - به lowercase تبدیل می‌کند (برای بخش پروتکل و هاست)
+    - فاصله‌های اضافه را حذف می‌کند
+    - برای لینک‌های دارای query string پارامترها را مرتب می‌کند
     """
     link = link.strip()
-    # پروکسی تلگرام
-    if link.startswith(('https://t.me/proxy?', 'tg://proxy?')):
-        key = _extract_proxy_key(link)
-        if key:
-            return key
-    # پروتکل‌های v2ray
-    elif link.startswith('vmess://'):
-        key = _extract_vmess_key(link)
-        if key:
-            return key
-    elif link.startswith('vless://'):
-        key = _extract_vless_key(link)
-        if key:
-            return key
-    elif link.startswith('trojan://'):
-        key = _extract_trojan_key(link)
-        if key:
-            return key
-    elif link.startswith('ss://'):
-        key = _extract_ss_key(link)
-        if key:
-            return key
-    # اگر هیچکدام جواب نداد، نرمال‌سازی پایه
-    return _basic_normalize(link)
+    try:
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        parsed = urlparse(link)
+        scheme   = parsed.scheme.lower()
+        netloc   = parsed.netloc.lower()
+        path     = parsed.path
+        params   = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
+        fragment = parsed.fragment
+        return urlunparse((scheme, netloc, path, parsed.params, params, fragment))
+    except Exception:
+        return link.lower()
+
 
 # ==========================================
-# توابع مدیریت صف
+# ✅ تنها تغییر: dedup روی new_items قبل از افزودن
 # ==========================================
-
 def update_queue(current_list, new_items, max_limit, delete_batch):
     """
     آیتم‌های جدید را به اول صف اضافه می‌کند.
-    از نرمالایز کردن لینک‌ها برای جلوگیری از ورود هر نوع تکراری استفاده می‌کند.
+    ابتدا new_items خودش dedup می‌شود، سپس با لیست فعلی مقایسه می‌شود.
     """
-    # یک set از نسخه نرمالایزشده آیتم‌های فعلی برای مقایسه سریع
+    # مرحله ۱: حذف تکراری از خود new_items (مثلاً لینک یکسان از دو کانال)
+    new_items = deduplicate_list(new_items)
+
+    # مرحله ۲: مقایسه با لیست فعلی
     existing_normalized = {normalize_link(x) for x in current_list}
 
     added_count = 0
@@ -300,6 +173,7 @@ def update_queue(current_list, new_items, max_limit, delete_batch):
         current_list = current_list[:keep]
 
     return current_list, added_count
+
 
 def deduplicate_list(lst: list) -> list:
     """
@@ -317,6 +191,7 @@ def deduplicate_list(lst: list) -> list:
 
 # اجرای پاکسازی اولیه روی داده‌های بارگذاری‌شده
 _initial_dedup()
+
 
 def scrape_all_channels():
     """اسکن سراسری همه کانال‌های پیش‌فرض + ساب‌های سفارشی"""
@@ -580,7 +455,6 @@ def _show_manual_update_menu(chat_id, send_new=False, msg_id=None):
     """نمایش همه ساب‌ها (شامل ساب‌های پیش‌فرض) برای آپدیت دستی"""
     markup = types.InlineKeyboardMarkup(row_width=1)
 
-    # ساب‌های پیش‌فرض
     markup.add(
         types.InlineKeyboardButton(
             f"🛡 پروکسی‌های پیش‌فرض  ({len(db['proxies'])} لینک)",
@@ -594,7 +468,6 @@ def _show_manual_update_menu(chat_id, send_new=False, msg_id=None):
         )
     )
 
-    # ساب‌های سفارشی
     for sub_id, sub in db.get("subs", {}).items():
         icon  = "⚡️" if sub.get("type") == "v2ray" else "🛡"
         count = len(sub.get("data", []))
@@ -664,7 +537,6 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
     icon     = "⚡️" if sub.get("type") == "v2ray" else "🛡"
     sub_link = f"{get_base_url()}/sub/{sub['name']}"
 
-    # اسم ساب و کانال‌ها رو escape می‌کنیم تا underscore مشکل Markdown ایجاد نکند
     safe_name  = _escape_md(sub['name'])
     safe_link  = _escape_md(sub_link)
     safe_chans = "\n".join([f"• {_escape_md(c)}" for c in chans]) if chans else "• ندارد"
@@ -723,7 +595,6 @@ def callback_inline(call):
     msg_id  = call.message.message_id
     data    = call.data
 
-    # ================== کانال پیش‌فرض ==================
     if data == "add_chan":
         set_state(chat_id, "waiting_for_add_chan")
         _edit_with_cancel(chat_id, msg_id,
@@ -740,7 +611,6 @@ def callback_inline(call):
         p, v = scrape_all_channels()
         bot.send_message(chat_id, f"✅ اسکن تمام شد!\n+{p} پروکسی جدید\n+{v} سرور V2ray جدید")
 
-    # ================== تنظیمات ==================
     elif data == "set_limits":
         set_state(chat_id, "waiting_for_limits")
         _edit_with_cancel(chat_id, msg_id,
@@ -756,7 +626,6 @@ def callback_inline(call):
         _edit_with_cancel(chat_id, msg_id,
             "زمان پاکسازی را به **ساعت** بفرستید. (مثال: `12`)")
 
-    # ================== ساخت ساب جدید ==================
     elif data in ("new_sub_proxy", "new_sub_v2ray"):
         sub_type = "proxy" if data == "new_sub_proxy" else "v2ray"
         set_state(chat_id, "add_sub_name", {"type": sub_type})
@@ -766,7 +635,6 @@ def callback_inline(call):
             "حالا یک **اسم** برای این ساب بنویس.\n"
             "_(فقط حروف انگلیسی، اعداد و خط تیره — این اسم در لینک ساب استفاده می‌شود)_")
 
-    # ================== جزئیات و ویرایش ساب ==================
     elif data.startswith("sub_detail:"):
         sub_id = data.split(":", 1)[1]
         _show_sub_detail(chat_id, sub_id, msg_id)
@@ -863,13 +731,11 @@ def callback_inline(call):
         except:
             pass
 
-    # ================== بعد از وارد کردن کانال‌ها در ساخت ساب جدید ==================
     elif data == "new_sub_confirm_settings":
         st2 = get_state(chat_id)
         if st2.get("state") == "add_sub_show_settings":
             _show_new_sub_settings_menu(chat_id, msg_id, st2["data"])
 
-    # ================== تنظیمات ساخت ساب جدید (ادغام‌شده) ==================
     elif data == "new_sub_set_limits":
         st2 = get_state(chat_id)
         set_state(chat_id, "new_sub_waiting_limits", st2.get("data", {}))
@@ -892,13 +758,11 @@ def callback_inline(call):
         st2 = get_state(chat_id)
         _finalize_new_sub(chat_id, msg_id, st2.get("data", {}))
 
-    # ================== آپدیت دستی ساب‌ها ==================
     elif data.startswith("manual_update:"):
         target = data.split(":", 1)[1]
         bot.answer_callback_query(call.id, "⏳ در حال اسکن...", show_alert=False)
 
         if target == "__default_proxy__":
-            # اسکن کانال‌های پیش‌فرض فقط برای پروکسی
             all_p = []
             for ch in db["channels"]:
                 p, _ = scrape_channel(ch, collect_proxy=True, collect_v2ray=False)
@@ -918,7 +782,6 @@ def callback_inline(call):
             )
 
         elif target == "__default_v2ray__":
-            # اسکن کانال‌های پیش‌فرض فقط برای v2ray
             all_v = []
             for ch in db["channels"]:
                 _, v = scrape_channel(ch, collect_proxy=False, collect_v2ray=True)
@@ -938,7 +801,6 @@ def callback_inline(call):
             )
 
         else:
-            # ساب سفارشی
             sub = db["subs"].get(target)
             if sub:
                 added = _update_sub(target)
@@ -955,14 +817,12 @@ def callback_inline(call):
             else:
                 bot.send_message(chat_id, "⚠️ ساب پیدا نشد.")
 
-        # نمایش مجدد منوی آپدیت با تعداد جدید
         _show_manual_update_menu(chat_id, msg_id=msg_id)
 
     bot.answer_callback_query(call.id)
 
 
 def _escape_md(text: str) -> str:
-    """کاراکترهای خاص Markdown v1 را escape می‌کند تا خطای parse نگیریم."""
     for ch in ['_', '*', '`', '[']:
         text = text.replace(ch, f'\\{ch}')
     return text
@@ -972,7 +832,6 @@ def _edit_with_cancel(chat_id, msg_id, text, back_data=None):
     if back_data:
         markup.add(types.InlineKeyboardButton("◀️ برگشت", callback_data=back_data))
     markup.add(types.InlineKeyboardButton("❌ کنسل", callback_data="cancel_action"))
-    # سعی می‌کنیم با Markdown، اگه fail شد بدون parse_mode می‌فرستیم
     for pm in ["Markdown", None]:
         try:
             if msg_id:
@@ -990,7 +849,6 @@ def _edit_with_cancel(chat_id, msg_id, text, back_data=None):
 
 
 def _show_new_sub_settings_menu(chat_id, msg_id, data):
-    """نمایش منوی تنظیمات هنگام ساخت ساب جدید"""
     name     = data.get("name", "")
     sub_type = data.get("type", "v2ray")
     channels = data.get("channels", [])
@@ -1032,7 +890,6 @@ def _show_new_sub_settings_menu(chat_id, msg_id, data):
 
 
 def _finalize_new_sub(chat_id, msg_id, data):
-    """ساب را ذخیره و لینک را نمایش می‌دهد."""
     name     = data.get("name", f"sub_{int(time.time())}")
     sub_type = data.get("type", "v2ray")
     channels = data.get("channels", [])
@@ -1086,7 +943,6 @@ def handle_states(message):
     data     = st.get("data", {})
     text_in  = message.text.strip()
 
-    # ===== تنظیمات پیش‌فرض =====
     if state == "waiting_for_admin":
         try:
             new_id = int(text_in)
@@ -1154,14 +1010,11 @@ def handle_states(message):
         bot.reply_to(message, f"✅ {removed} کانال حذف شد.")
         clear_state(chat_id)
 
-    # ===== ساخت ساب جدید — مرحله اسم =====
     elif state == "add_sub_name":
-        # اعتبارسنجی اسم
         clean_name = re.sub(r'[^a-zA-Z0-9\-_]', '', text_in.strip())
         if not clean_name:
             bot.reply_to(message, "⚠️ اسم باید فقط شامل حروف انگلیسی، اعداد و - باشد.")
             return
-        # بررسی تکراری نبودن
         for s in db["subs"].values():
             if s.get("name", "").lower() == clean_name.lower():
                 bot.reply_to(message, "⚠️ این اسم قبلاً استفاده شده. یک اسم دیگر بفرست.")
@@ -1175,7 +1028,6 @@ def handle_states(message):
             "_(هر خط یک کانال — آیدی یا لینک t.me قبول می‌شود)_",
             parse_mode="Markdown")
 
-    # ===== ساخت ساب جدید — مرحله کانال‌ها =====
     elif state == "add_sub_channels":
         raw_chans = text_in.split("\n")
         channels = []
@@ -1196,7 +1048,6 @@ def handle_states(message):
         })
         set_state(chat_id, "add_sub_show_settings", data)
 
-        # ارسال پیام جدید با منوی تنظیمات
         icon = "⚡️" if data.get("type") == "v2ray" else "🛡"
         sett = data["settings"]
         text = (
@@ -1219,7 +1070,6 @@ def handle_states(message):
         markup.add(types.InlineKeyboardButton("❌ کنسل", callback_data="cancel_action"))
         bot.reply_to(message, text, reply_markup=markup, parse_mode="Markdown")
 
-    # ===== تنظیمات هنگام ساخت ساب جدید =====
     elif state == "new_sub_waiting_limits":
         try:
             p = text_in.split("-")
@@ -1249,7 +1099,6 @@ def handle_states(message):
         except:
             bot.reply_to(message, "⚠️ فقط عدد بفرستید.")
 
-    # ===== ویرایش ساب موجود =====
     elif state == "sub_edit_chan":
         sub_id = data.get("sub_id")
         raw_chans = text_in.split("\n")
@@ -1320,16 +1169,13 @@ def handle_states(message):
             resp.raise_for_status()
             raw = resp.text.strip()
 
-            # تلاش برای decode کردن base64
             decoded = ""
             try:
-                # padding اضافه کن اگر لازم باشد
                 padded = raw + "=" * (-len(raw) % 4)
                 decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
             except Exception:
                 decoded = ""
 
-            # اگر decode موفق بود و شامل vless/vmess/ss/trojan بود استفاده کن
             content = decoded if decoded and re.search(V2RAY_REGEX, decoded) else raw
 
             proxies_found, v2ray_found = extract_configs(content)
