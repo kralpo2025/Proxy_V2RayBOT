@@ -132,22 +132,38 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
 
 def normalize_link(link: str) -> str:
     """
-    نرمالایز هوشمند لینک برای تشخیص تکراری.
-    برای V2ray: fragment (#نام) حذف میشه — چون همون سرور با اسمهای مختلف تکراری میشه.
+    نرمالایز کاملاً هوشمند برای تشخیص سرورهای تکراری:
+    - vmess: base64 decode میشه، فقط add/port/id/net/tls مقایسه میشه (ps/نام نادیده)
+    - vless/trojan/ss: fragment حذف، query مرتب میشه
     """
+    import base64 as _b64, json as _json
     from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
     link = link.strip()
     try:
+        if link.lower().startswith('vmess://'):
+            b64 = link[8:]
+            b64 += '=' * (-len(b64) % 4)
+            try:
+                payload = _json.loads(_b64.b64decode(b64).decode('utf-8', errors='ignore'))
+                key = _json.dumps({
+                    'add':  str(payload.get('add',  payload.get('host', ''))).lower().strip(),
+                    'port': str(payload.get('port', '')).strip(),
+                    'id':   str(payload.get('id',   '')).strip(),
+                    'net':  str(payload.get('net',  '')).lower().strip(),
+                    'tls':  str(payload.get('tls',  '')).lower().strip(),
+                }, sort_keys=True)
+                return 'vmess://' + key
+            except Exception:
+                pass
         parsed = urlparse(link)
         scheme = parsed.scheme.lower()
         netloc = parsed.netloc.lower()
         path   = parsed.path.lower()
         qs     = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
-        # برای همه لینکها fragment حذف میشه (مهمترین تغییر برای V2ray)
-        return urlunparse((scheme, netloc, path, "", qs, ""))
+        return urlunparse((scheme, netloc, path, '', qs, ''))
     except Exception:
         try:
-            return link.lower().split("#")[0].strip()
+            return link.lower().split('#')[0].strip()
         except Exception:
             return link.lower()
 
