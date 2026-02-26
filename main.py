@@ -132,23 +132,24 @@ def scrape_channel(channel, collect_proxy=True, collect_v2ray=True):
 
 def normalize_link(link: str) -> str:
     """
-    لینک را نرمالایز می‌کند تا مقایسه تکراری بودن دقیق‌تر باشد.
-    - به lowercase تبدیل می‌کند (برای بخش پروتکل و هاست)
-    - فاصله‌های اضافه را حذف می‌کند
-    - برای لینک‌های دارای query string پارامترها را مرتب می‌کند
+    نرمالایز هوشمند لینک برای تشخیص تکراری.
+    برای V2ray: fragment (#نام) حذف میشه — چون همون سرور با اسمهای مختلف تکراری میشه.
     """
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
     link = link.strip()
     try:
-        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
         parsed = urlparse(link)
-        scheme   = parsed.scheme.lower()
-        netloc   = parsed.netloc.lower()
-        path     = parsed.path
-        params   = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
-        fragment = parsed.fragment
-        return urlunparse((scheme, netloc, path, parsed.params, params, fragment))
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path   = parsed.path.lower()
+        qs     = urlencode(sorted(parse_qs(parsed.query, keep_blank_values=True).items()))
+        # برای همه لینکها fragment حذف میشه (مهمترین تغییر برای V2ray)
+        return urlunparse((scheme, netloc, path, "", qs, ""))
     except Exception:
-        return link.lower()
+        try:
+            return link.lower().split("#")[0].strip()
+        except Exception:
+            return link.lower()
 
 
 # ==========================================
