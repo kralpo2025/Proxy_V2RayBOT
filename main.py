@@ -15,7 +15,7 @@ import uuid
 # ==========================================
 ROOT_ADMIN_ID = 7419222963
 
-bot = telebot.TeleBot("7632535360:AAElwqtIX521S9n_pAxo0UWRWSPkMVMdjMI")
+bot = telebot.TeleBot("7632535360:AAHIvuQuO7FbmNrTsogW8C0bY3nTWPjnxHw")
 
 # ==========================================
 # سیستم دیتابیس
