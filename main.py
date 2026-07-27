@@ -74,13 +74,6 @@ def load_db():
                 "interval_hours": 24,
                 "type": "both",
                 "last_sent": 0
-            },
-            # تنظیمات گیت‌هاب بدون توکن ثابت
-            "github": {
-                "token": "",
-                "username": "",
-                "repo": "ProxySub",
-                "setup_done": False
             }
         },
         "proxies": [],
@@ -95,9 +88,6 @@ def load_db():
                 for k, v in default_db["settings"].items():
                     if k not in loaded.get("settings", {}):
                         loaded.setdefault("settings", {})[k] = v
-                # بررسی وجود تنظیمات github در دیتابیس قدیمی
-                if "github" not in loaded.get("settings", {}):
-                    loaded.setdefault("settings", {})["github"] = default_db["settings"]["github"]
                 if "subs" not in loaded:
                     loaded["subs"] = {}
                 logger.info("Database loaded successfully.")
@@ -147,117 +137,6 @@ def set_state(chat_id, state, data=None):
 
 def clear_state(chat_id):
     user_states[chat_id] = {}
-
-# ==========================================
-# هسته ارتباط با GitHub API (داینامیک و بدون هاردکد)
-# ==========================================
-def get_github_creds():
-    gh = db.get("settings", {}).get("github", {})
-    return gh.get("token", ""), gh.get("username", ""), gh.get("repo", "ProxySub")
-
-def get_github_raw_url(path):
-    _, username, repo = get_github_creds()
-    username = username if username else "YourUsername"
-    repo = repo if repo else "ProxySub"
-    return f"https://raw.githubusercontent.com/{username}/{repo}/main/{path}"
-
-def init_github():
-    token, username, repo = get_github_creds()
-    if not token or not username:
-        logger.warning("GitHub credentials not fully set. Skipping GitHub initialization.")
-        return
-
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    try:
-        # بررسی وجود Repository یا ساخت آن
-        repo_url = f"https://api.github.com/repos/{username}/{repo}"
-        res_repo = session.get(repo_url, headers=headers, timeout=10)
-        
-        if res_repo.status_code == 404:
-            logger.info(f"Repository {repo} not found. Creating...")
-            create_res = session.post(
-                "https://api.github.com/user/repos",
-                headers=headers,
-                json={"name": repo, "private": False, "auto_init": True},
-                timeout=15
-            )
-            if create_res.status_code in [200, 201]:
-                logger.info("GitHub Repository created successfully.")
-            else:
-                logger.error(f"Failed to create repo: {create_res.text}")
-                
-        # یک‌بار سینک اولیه
-        threading.Thread(target=sync_all_to_github, daemon=True).start()
-    except Exception as e:
-        logger.error(f"GitHub Init Error: {e}")
-
-def push_to_github(filepath, raw_content):
-    token, username, repo = get_github_creds()
-    if not token or not username:
-        return
-        
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    url = f"https://api.github.com/repos/{username}/{repo}/contents/{filepath}"
-    
-    try:
-        b64_new_content = base64.b64encode(raw_content.encode('utf-8')).decode('utf-8')
-        sha = None
-        
-        # بررسی وضعیت فعلی فایل
-        res_get = session.get(url, headers=headers, timeout=10)
-        if res_get.status_code == 200:
-            data = res_get.json()
-            sha = data.get("sha")
-            existing_b64 = data.get("content", "").replace("\n", "").replace("\r", "")
-            if existing_b64 == b64_new_content:
-                return # در صورت یکسان بودن از ارسال تکراری جلوگیری میشود
-                
-        payload = {
-            "message": f"Auto update {filepath} via Bot",
-            "content": b64_new_content
-        }
-        if sha:
-            payload["sha"] = sha
-            
-        res_put = session.put(url, headers=headers, json=payload, timeout=15)
-        if res_put.status_code in [200, 201]:
-            logger.info(f"Successfully pushed to GitHub: {filepath}")
-        else:
-            logger.error(f"GitHub Push Error for {filepath}: {res_put.text}")
-    except Exception as e:
-        logger.error(f"Error pushing {filepath} to GitHub: {e}")
-
-def sync_all_to_github():
-    try:
-        clean_proxy = deduplicate_list(db.get("proxies", []))
-        push_to_github("Proxy.txt", "\n".join(clean_proxy))
-        
-        clean_v2ray = deduplicate_list(db.get("v2ray", []))
-        processed_v2ray = process_v2ray_links(clean_v2ray)
-        v2ray_content = base64.b64encode("\n".join(processed_v2ray).encode()).decode()
-        push_to_github("V2Ray.txt", v2ray_content)
-        
-        for sub_id, sub in db.get("subs", {}).items():
-            name = sub.get("name")
-            sub_type = sub.get("type", "v2ray")
-            clean_sub = deduplicate_list(sub.get("data", []))
-            
-            if sub_type == "v2ray":
-                processed = process_v2ray_links(clean_sub)
-                content = base64.b64encode("\n".join(processed).encode()).decode()
-            else:
-                content = "\n".join(clean_sub)
-                
-            push_to_github(f"Subs/{name}.txt", content)
-    except Exception as e:
-        logger.error(f"Error in sync_all_to_github: {e}")
-
-def github_watcher_loop():
-    while True:
-        gh = db.get("settings", {}).get("github", {})
-        if gh.get("setup_done"):
-            init_github()
-        time.sleep(1800)
 
 # ==========================================
 # سیستم هوشمند تشخیص پرچم (با Cache)
@@ -441,9 +320,6 @@ def scrape_all_channels():
     save_db(db)
     gc.collect()
     
-    # آپدیت اتوماتیک گیت‌هاب بعد از اتمام اسکن
-    threading.Thread(target=sync_all_to_github, daemon=True).start()
-    
     return p_added, v_added
 
 def _update_sub(sub_id):
@@ -527,30 +403,28 @@ def auto_send_file_loop():
         time.sleep(60)
 
 # ==========================================
-# سرور Flask هوشمند و مقاوم (مسیرهای قبلی دست‌نخورده باقی ماندند)
+# سرور Flask هوشمند و مقاوم
 # ==========================================
 app = Flask(__name__)
 
 def get_base_url():
+    # Render domain
+    if os.environ.get("RENDER_EXTERNAL_URL"):
+        return os.environ.get("RENDER_EXTERNAL_URL")
+    
     envs = [
-        "RENDER_EXTERNAL_URL", "RAILWAY_PUBLIC_DOMAIN", "RAILWAY_STATIC_URL",
-        "KOYEB_PUBLIC_DOMAIN", "APP_URL", "BASE_URL", "PUBLIC_URL", "FLY_APP_NAME"
+        "RAILWAY_PUBLIC_DOMAIN", "RAILWAY_STATIC_URL",
+        "KOYEB_PUBLIC_DOMAIN", "APP_URL", "BASE_URL", "PUBLIC_URL"
     ]
     for e in envs:
         val = os.environ.get(e)
         if val:
-            if e == "FLY_APP_NAME":
-                return f"https://{val}.fly.dev"
             return val if val.startswith("http") else "https://" + val
-    try:
-        if request:
-            proto = request.headers.get("X-Forwarded-Proto", "http")
-            host = request.headers.get("X-Forwarded-Host", request.host)
-            if host:
-                return f"{proto}://{host}"
-    except RuntimeError:
-        pass
-    return "http://localhost:10000"
+            
+    if os.environ.get("FLY_APP_NAME"):
+        return f"https://{os.environ.get('FLY_APP_NAME')}.fly.dev"
+        
+    return "https://your-app-domain.onrender.com" # Fallback
 
 @app.route('/')
 def index():
@@ -637,27 +511,12 @@ def send_files_to_chat(chat_id, file_type="both"):
 # هندلرهای دستوری
 # ==========================================
 
-# دستور جدید برای مدیریت گیت‌هاب
-@bot.message_handler(commands=['github', 'setgithub'])
-def cmd_setgithub(message):
-    if not is_admin(message.chat.id):
-        bot.reply_to(message, "⛔️ شما اجازه دسترسی ندارید.")
-        return
-    set_state(message.chat.id, "waiting_for_gh_token")
-    bot.reply_to(message, "🔑 لطفاً **GitHub Personal Access Token** خود را ارسال کنید:\n*(این توکن در فایل دیتابیس امن ذخیره خواهد شد)*", parse_mode="Markdown")
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     if not is_admin(message.chat.id):
         bot.reply_to(message, "⛔️ شما اجازه دسترسی ندارید.")
         return
     clear_state(message.chat.id)
-    
-    # بررسی اینکه آیا تنظیمات گیت‌هاب قبلاً انجام شده است یا خیر
-    gh = db.get("settings", {}).get("github", {})
-    if not gh.get("setup_done"):
-        bot.reply_to(message, "⚠️ **تنظیمات GitHub هنوز انجام نشده است!**\n\nبرای آپلود خودکار فایل‌ها و دریافت لینک‌های سابسکریپشن گیت‌هاب، لطفاً دستور /setgithub را ارسال کنید.", parse_mode="Markdown")
-        
     bot.reply_to(
         message,
         "سلام مدیر عزیز! 🤖\nبه پنل مدیریت سیستم سابسکریپشن خوش آمدید.",
@@ -670,29 +529,23 @@ def send_welcome(message):
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == "🛡 پروکسی ها (MTProto)")
 def btn_proxies(message):
     clear_state(message.chat.id)
-    sub_link = get_github_raw_url("Proxy.txt")
-    
-    gh = db.get("settings", {}).get("github", {})
-    warning = "" if gh.get("setup_done") else "\n\n⚠️ *توجه: اطلاعات گیت‌هاب ثبت نشده! دستور /setgithub را بزنید.*"
+    sub_link = f"{get_base_url()}/sub/proxies"
     
     bot.reply_to(message,
         f"🛡 **لینک سابسکریپشن پروکسی‌های تلگرام:**\n`{sub_link}`\n\n"
         f"📊 تعداد فعلی: {len(db['proxies'])} عدد\n"
-        f"*(فایل از طریق GitHub سرویس‌دهی می‌شود)*{warning}",
+        f"*(فایل مستقیماً از سرور شما سرویس‌دهی می‌شود)*",
         parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == "⚡️ سرور های V2ray")
 def btn_v2ray(message):
     clear_state(message.chat.id)
-    sub_link = get_github_raw_url("V2Ray.txt")
-    
-    gh = db.get("settings", {}).get("github", {})
-    warning = "" if gh.get("setup_done") else "\n\n⚠️ *توجه: اطلاعات گیت‌هاب ثبت نشده! دستور /setgithub را بزنید.*"
+    sub_link = f"{get_base_url()}/sub/v2ray"
     
     bot.reply_to(message,
         f"⚡️ **لینک سابسکریپشن سرورهای V2ray:**\n`{sub_link}`\n\n"
         f"📊 تعداد فعلی: {len(db['v2ray'])} عدد\n"
-        f"*(فایل از طریق GitHub سرویس‌دهی می‌شود)*{warning}",
+        f"*(فایل مستقیماً از سرور شما سرویس‌دهی می‌شود)*",
         parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: is_admin(m.chat.id) and m.text == "👥 مدیریت ادمین ها")
@@ -894,14 +747,11 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
     count    = len(sub.get("data", []))
     icon     = "⚡️" if sub.get("type") == "v2ray" else "🛡"
     
-    sub_link = get_github_raw_url(f"Subs/{sub['name']}.txt")
+    sub_link = f"{get_base_url()}/sub/{sub['name']}"
 
     safe_name  = _escape_md(sub['name'])
     safe_link  = _escape_md(sub_link)
     safe_chans = "\n".join([f"• {_escape_md(c)}" for c in chans]) if chans else "• ندارد"
-
-    gh = db.get("settings", {}).get("github", {})
-    warning = "" if gh.get("setup_done") else "\n\n⚠️ *توجه: اطلاعات گیت‌هاب ثبت نشده! دستور /setgithub را بزنید.*"
 
     text = (
         f"{icon} *ساب: {safe_name}*\n"
@@ -913,7 +763,7 @@ def _show_sub_detail(chat_id, sub_id, msg_id=None):
         f"🧹 پاکسازی: هر {sett.get('clean_interval_hours', 12)} ساعت\n\n"
         f"📊 لینک‌های فعلی: {count} عدد\n"
         f"🔗 لینک ساب:\n`{safe_link}`\n"
-        f"*(فایل از طریق GitHub سرویس‌دهی می‌شود)*{warning}"
+        f"*(فایل مستقیماً از سرور شما سرویس‌دهی می‌شود)*"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -967,7 +817,6 @@ def callback_inline(call):
             sett = db["settings"].setdefault("v2ray_rename", {})
             sett["enabled"] = not sett.get("enabled", False)
             save_db(db)
-            threading.Thread(target=sync_all_to_github, daemon=True).start()
             _show_rename_menu(chat_id, msg_id)
             return
         elif data == "rename_set_name":
@@ -986,7 +835,6 @@ def callback_inline(call):
         elif data in ["set_num_001", "set_num_hash"]:
             db["settings"].setdefault("v2ray_rename", {})["num_type"] = "001" if data == "set_num_001" else "#1"
             save_db(db)
-            threading.Thread(target=sync_all_to_github, daemon=True).start()
             _show_rename_menu(chat_id, msg_id)
             return
         elif data == "rename_set_fmt":
@@ -1111,7 +959,6 @@ def callback_inline(call):
             bot.answer_callback_query(call.id, "در حال آپدیت ساب...", show_alert=True)
             added = _update_sub(sub_id)
             save_db(db)
-            threading.Thread(target=sync_all_to_github, daemon=True).start()
             sub = db["subs"].get(sub_id, {})
             bot.send_message(chat_id, f"✅ ساب «{sub.get('name','')}» آپدیت شد.\n+{added} لینک جدید اضافه شد.")
             _show_sub_detail(chat_id, sub_id, msg_id)
@@ -1194,7 +1041,6 @@ def callback_inline(call):
                 sett = db["settings"]
                 db["proxies"], added = update_queue(db["proxies"], all_p, sett["max_limit"], sett["delete_batch"])
                 save_db(db)
-                threading.Thread(target=sync_all_to_github, daemon=True).start()
                 bot.send_message(chat_id, f"✅ **آپدیت ساب پروکسی پیش‌فرض**\n\nلینک‌های جدید: **+{added}** عدد", parse_mode="Markdown")
 
             elif target == "__default_v2ray__":
@@ -1206,7 +1052,6 @@ def callback_inline(call):
                 sett = db["settings"]
                 db["v2ray"], added = update_queue(db["v2ray"], all_v, sett["max_limit"], sett["delete_batch"])
                 save_db(db)
-                threading.Thread(target=sync_all_to_github, daemon=True).start()
                 bot.send_message(chat_id, f"✅ **آپدیت ساب V2ray پیش‌فرض**\n\nلینک‌های جدید: **+{added}** عدد", parse_mode="Markdown")
 
             else:
@@ -1214,7 +1059,6 @@ def callback_inline(call):
                 if sub:
                     added = _update_sub(target)
                     save_db(db)
-                    threading.Thread(target=sync_all_to_github, daemon=True).start()
                     bot.send_message(chat_id, f"✅ **آپدیت ساب «{sub['name']}»**\n\nلینک‌های جدید: **+{added}** عدد", parse_mode="Markdown")
                 else:
                     bot.send_message(chat_id, "⚠️ ساب پیدا نشد.")
@@ -1287,15 +1131,13 @@ def _finalize_new_sub(chat_id, msg_id, data):
     }
     save_db(db)
     
-    threading.Thread(target=sync_all_to_github, daemon=True).start()
-    
-    sub_link = get_github_raw_url(f"Subs/{name}.txt")
+    sub_link = f"{get_base_url()}/sub/{name}"
     icon = "⚡️" if sub_type == "v2ray" else "🛡"
     clear_state(chat_id)
     text = (
         f"✅ **ساب «{name}» با موفقیت ساخته شد!** {icon}\n\n"
         f"🔗 لینک ساب شما:\n`{sub_link}`\n\n"
-        "ربات از این کانال‌ها لینک جمع‌آوری می‌کند و ساب را در GitHub آپدیت نگه می‌دارد."
+        "ربات از این کانال‌ها لینک جمع‌آوری می‌کند."
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🔄 آپدیت فوری", callback_data=f"sub_force_update:{sub_id}"))
@@ -1313,34 +1155,9 @@ def handle_states(message):
     text_in  = message.text.strip()
 
     try:
-        # مدیریت State ماشین برای دریافت اطلاعات گیت‌هاب
-        if state == "waiting_for_gh_token":
-            db["settings"]["github"]["token"] = text_in
-            set_state(chat_id, "waiting_for_gh_username")
-            bot.reply_to(message, "✅ توکن ثبت شد.\n\n👤 حالا **GitHub Username** (نام کاربری گیت‌هاب) خود را ارسال کنید:")
-            return
-            
-        elif state == "waiting_for_gh_username":
-            db["settings"]["github"]["username"] = text_in
-            set_state(chat_id, "waiting_for_gh_repo")
-            bot.reply_to(message, "✅ یوزرنیم ثبت شد.\n\n📂 حالا **نام Repository** را ارسال کنید (مثلاً `ProxySub`).\nاگر نامی وارد نکنید یا کلمه‌ی دیگری نفرستید و فقط پیش‌فرض را بخواهید، یک نام پیش‌فرض در نظر گرفته می‌شود:")
-            return
-            
-        elif state == "waiting_for_gh_repo":
-            repo_name = text_in if text_in else "ProxySub"
-            db["settings"]["github"]["repo"] = repo_name
-            db["settings"]["github"]["setup_done"] = True
-            save_db(db)
-            clear_state(chat_id)
-            
-            bot.reply_to(message, "✅ **اطلاعات GitHub با موفقیت ذخیره شد.**\n\nدر حال ارتباط با API گیت‌هاب برای آماده‌سازی مخزن و فایل‌ها... ⏳", parse_mode="Markdown")
-            threading.Thread(target=init_github, daemon=True).start()
-            return
-            
         if state == "waiting_for_rename_name":
             db["settings"].setdefault("v2ray_rename", {})["name"] = text_in
             save_db(db)
-            threading.Thread(target=sync_all_to_github, daemon=True).start()
             bot.reply_to(message, "✅ نام سرور ثبت شد.")
             clear_state(chat_id)
             _show_rename_menu(chat_id, send_new=True)
@@ -1348,7 +1165,6 @@ def handle_states(message):
         elif state == "waiting_for_rename_fmt":
             db["settings"].setdefault("v2ray_rename", {})["format"] = text_in
             save_db(db)
-            threading.Thread(target=sync_all_to_github, daemon=True).start()
             bot.reply_to(message, "✅ فرمت جدید ثبت شد.")
             clear_state(chat_id)
             _show_rename_menu(chat_id, send_new=True)
@@ -1561,8 +1377,6 @@ def handle_states(message):
                 sub_sett = sub.get("settings", db["settings"])
                 sub["data"], added = update_queue(sub.get("data", []), links, sub_sett["max_limit"], sub_sett["delete_batch"])
                 save_db(db)
-                
-                threading.Thread(target=sync_all_to_github, daemon=True).start()
 
                 bot.edit_message_text(f"✅ **وارد کردن از لینک ساب انجام شد!**\n\nلینک‌های جدید: **+{added}** عدد", chat_id=chat_id, message_id=wait_msg.message_id, parse_mode="Markdown")
 
@@ -1586,13 +1400,7 @@ def run_telegram_bot():
 
 if __name__ == "__main__":
     
-    # اجرای اولیه گیت‌هاب در صورت وارد شدن اطلاعات
-    gh_settings = db.get("settings", {}).get("github", {})
-    if gh_settings.get("setup_done"):
-        threading.Thread(target=init_github, daemon=True).start()
-    
     # حلقه‌های زمان‌بندی و هوشمند
-    resilient_thread(github_watcher_loop, "GitHubWatcher")
     resilient_thread(auto_scraper_loop, "Scraper")
     resilient_thread(auto_clean_loop, "Cleaner")
     resilient_thread(auto_send_file_loop, "AutoSender")
