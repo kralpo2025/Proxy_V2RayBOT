@@ -47,7 +47,7 @@ session.mount('https://', adapter)
 # ==========================================
 ROOT_ADMIN_ID = 7419222963
 # توکن ربات تلگرام
-bot = telebot.TeleBot("7632535360:AAGDFbNcOJpkCpcGb9N77c9U_IAFZ1f0qck", threaded=True)
+bot = telebot.TeleBot("7632535360:AAG5njroLyuNTZgXgCh932YKASRPZktvOSQ", threaded=True)
 
 # ==========================================
 # سیستم دیتابیس
